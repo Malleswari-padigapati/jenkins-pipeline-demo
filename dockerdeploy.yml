@@ -1,0 +1,89 @@
+pipeline {
+    agent any
+
+    environment {
+
+        GIT_REPO = 'https://github.com/Malleswari-padigapati/myproject.git'
+        GIT_BRANCH = 'janu'
+        DOCKER_IMAGE =  'malliswari00/python'
+        GIT_CRED = 'github-creds'
+        DOCKER_CRED = 'dockerhub-creds'
+        AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
+        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
+        AWS_DEFAULT_REGION     = 'ap-south-1'
+        PRIVATE_KEY = 'Private-key'
+    }
+
+    stages {
+
+        stage('Checkout from GitHub') {
+            steps {
+                git branch: "${GIT_BRANCH}", url: "${GIT_REPO}", credentialsId: "${GIT_CRED}"
+            }
+        }
+
+        stage('Terraform Init & Apply') {
+            steps {
+                    sh '''
+                    terraform init -input=false
+                    terraform destroy -auto-approve
+                    terraform apply -auto-approve -input=false
+                    '''
+                }
+            }
+        
+
+        
+        stage('Configure Server with Ansible') {
+             steps {
+               withCredentials([sshUserPrivateKey(credentialsId: 'Private-key', keyFileVariable: 'PRIVATE_KEY')]) {
+            // Disable SSH host key checking for lab environment
+                   sh '''
+                      export ANSIBLE_HOST_KEY_CHECKING=False
+                      ansible-playbook -i inventory.ini site.yml --private-key /var/lib/jenkins/.ssh/practice.pem
+                '''
+        }
+    }
+}
+        
+
+        stage('Build Docker Image') {
+            steps {
+                    sh '''
+                    docker build -t ${DOCKER_IMAGE}:latest .
+                    '''
+                }
+            }
+        
+
+        stage('Push Docker Image to DockerHub') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${DOCKER_CRED}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                    docker push ${DOCKER_IMAGE}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Container from DockerHub') {
+            steps {
+                sh '''
+                docker pull ${DOCKER_IMAGE}:latest
+                docker rm -f myapp || true
+                docker run -d --name myapp -p 5000:5000 ${DOCKER_IMAGE}:latest
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Pipeline completed successfully!"
+        }
+        failure {
+            echo "❌ Pipeline failed. Check console output."
+        }
+    }
+}
