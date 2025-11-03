@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+
+    environment {
+        GIT_REPO = 'https://github.com/Malleswari-padigapati/myproject.git'
+        GIT_BRANCH = 'janu'
+        DOCKER_IMAGE = 'malliswari00/python'
+        GIT_CRED = 'github-creds'
+        DOCKER_CRED = 'dockerhub-creds'
+        AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
+        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
+        AWS_DEFAULT_REGION     = 'ap-south-1'
+        PRIVATE_KEY = 'Private-key'
+    }
+
+    stages {
+
+        stage('Checkout from GitHub') {
+            steps {
+                echo "Cloning repository..."
+                git branch: "${GIT_BRANCH}", url: "${GIT_REPO}", credentialsId: "${GIT_CRED}"
+            }
+        }
+
+        stage('Terraform Init & Apply') {
+            steps {
+                echo "Provisioning Infrastructure with Terraform..."
+                sh '''
+                terraform init -input=false
+                terraform destroy -auto-approve
+                terraform apply -auto-approve -input=false
+                '''
+            }
+        }
+
+        stage('Configure Server with Ansible') {
+            steps {
+                echo "Configuring Server using Ansible..."
+                withCredentials([sshUserPrivateKey(credentialsId: 'Private-key', keyFileVariable: 'PRIVATE_KEY')]) {
+                    sh '''
+                    export ANSIBLE_HOST_KEY_CHECKING=False
+                    ansible-playbook -i inventory.ini site.yml --private-key $PRIVATE_KEY
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo "Building Docker Image..."
+                sh '''
+                docker build -t ${DOCKER_IMAGE}:latest .
+                '''
+            }
+        }
+
+        stage('Push Docker Image to DockerHub') {
+            steps {
+                echo "Pushing Docker Image to DockerHub..."
+                withCredentials([usernamePassword(credentialsId: "${DOCKER_CRED}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                    docker push ${DOCKER_IMAGE}:latest
+                    docker pull ${DOCKER_IMAGE}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                echo "Deploying Application on Kubernetes..."
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                    sh '''
+                    export KUBECONFIG=$KUBECONFIG_FILE
+
+                
+                    kubectl apply -f deployment.yaml
+                    kubectl set image deployment/myapp-deployment myapp-container=${DOCKER_IMAGE}:latest -n default
+                    kubectl rollout restart deployment/myapp-deployment -n default
+
+                    echo "Checking running pods..."
+                    kubectl get pods -n default
+                    echo "Checking service..."
+    
+                    kubectl get svc -n default
+                    
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline completed successfully!"
+        }
+        failure {
+            echo "Pipeline failed. Check console output."
+        }
+    }
+}
